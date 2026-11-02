@@ -462,9 +462,219 @@ function downloadImage() {
     link.click();
 }
 
-function printImage() { window.print(); }
+// =====================================================
+// PRINTER THERMAL BLUETOOTH (SC03h, protokol "cat printer")
+// =====================================================
+const PRINTER = {
+    namePrefix: 'SC03',
+    service: 0xAE30,
+    writeChar: 0xAE01,
+    notifyChar: 0xAE02,
+    dotsWidth: 384,          // 58 mm = 384 dot
+    chunkSize: 100,          // byte per kirim. Kalau hasil cetak acak/putus, turunkan ke 20
+    chunkDelay: 15,          // ms jeda antar kirim. Kalau putus-putus, naikkan ke 25-30
+    energy: 20000,           // kepadatan titik. Default awal 12000, maksimum 65535. Naikkan bertahap (16000, 20000, 25000, 30000)
+    speed: 0x10,             // makin kecil = makin lambat = titik makin padat (default awal 0x20)
+    quality: 0x35,           // 0x31 - 0x35, makin besar makin gelap
+    feedLines: 0x80,         // jarak kertas keluar setelah cetak
+    contrast: 1.4,          // kontras sebelum dithering
+    brightness: -15            // -40 s/d +40, naikkan kalau hasil terlalu gelap
+};
+
+let printerDevice = null;
+let printerChar = null;
+let isPrinting = false;
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+function setPrinterStatus(connected, text) {
+    const el = document.getElementById('printer-status');
+    if (!el) return;
+    el.classList.toggle('on', connected);
+    el.classList.toggle('off', !connected);
+    el.textContent = text || (connected ? '🖨️ Printer: terhubung' : '🖨️ Printer: belum terhubung');
+}
+
+// --- Koneksi ---
+async function openGatt() {
+    const server = await printerDevice.gatt.connect();
+    const service = await server.getPrimaryService(PRINTER.service);
+    printerChar = await service.getCharacteristic(PRINTER.writeChar);
+    try {
+        const n = await service.getCharacteristic(PRINTER.notifyChar);
+        await n.startNotifications();
+        n.addEventListener('characteristicvaluechanged', e => {
+            const v = new Uint8Array(e.target.value.buffer);
+            console.log('Printer:', [...v].map(b => b.toString(16).padStart(2, '0')).join(' '));
+        });
+    } catch (e) { console.warn('Notify tidak aktif:', e.message); }
+    setPrinterStatus(true);
+}
+
+// Return true kalau siap. Harus dipanggil dari klik pengguna kalau belum pernah dipilih.
+async function ensurePrinter() {
+    if (!navigator.bluetooth) {
+        alert('Browser ini tidak mendukung Web Bluetooth. Pakai Chrome/Edge (Brave: aktifkan flag Web Bluetooth).');
+        return false;
+    }
+    if (printerChar && printerDevice && printerDevice.gatt.connected) return true;
+
+    // Coba sambung ulang ke perangkat yang sudah dipilih (tanpa dialog)
+    if (printerDevice) {
+        try { await openGatt(); return true; }
+        catch (e) { console.warn('Sambung ulang gagal:', e.message); printerDevice = null; }
+    }
+
+    // Pertama kali: dialog pilih perangkat
+    try {
+        printerDevice = await navigator.bluetooth.requestDevice({
+            filters: [{ namePrefix: PRINTER.namePrefix }],
+            optionalServices: [PRINTER.service]
+        });
+        printerDevice.addEventListener('gattserverdisconnected', () => {
+            printerChar = null;
+            setPrinterStatus(false);
+        });
+        await openGatt();
+        return true;
+    } catch (e) {
+        printerDevice = null;
+        setPrinterStatus(false);
+        if (e.name !== 'NotFoundError') alert('Gagal menghubungkan printer: ' + e.message);
+        return false;
+    }
+}
+
+async function connectPrinterClick() {
+    setPrinterStatus(false, '🖨️ Menyambung...');
+    await ensurePrinter();
+}
+
+// --- Protokol paket ---
+function crc8(data) {
+    let crc = 0;
+    for (const b of data) {
+        crc ^= b;
+        for (let i = 0; i < 8; i++) crc = (crc & 0x80) ? ((crc << 1) ^ 0x07) & 0xFF : (crc << 1) & 0xFF;
+    }
+    return crc;
+}
+function pkt(cmd, data) {
+    const d = Array.from(data);
+    return [0x51, 0x78, cmd, 0x00, d.length & 0xFF, d.length >> 8, ...d, crc8(d), 0xFF];
+}
+
+// --- Gambar -> baris bitmap 1-bit (dithering Floyd-Steinberg) ---
+async function imageToPrintLines(src) {
+    const img = await loadImage(src);
+    const W = PRINTER.dotsWidth;
+    const H = Math.round(img.height * W / img.width);
+
+    const c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    const cx = c.getContext('2d');
+    cx.fillStyle = '#fff';
+    cx.fillRect(0, 0, W, H);
+    cx.drawImage(img, 0, 0, W, H);
+
+    const px = cx.getImageData(0, 0, W, H).data;
+    const g = new Float32Array(W * H);
+    for (let i = 0; i < W * H; i++) {
+        let v = 0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2];
+        v = (v - 128) * PRINTER.contrast + 128 + PRINTER.brightness;
+        g[i] = Math.max(0, Math.min(255, v));
+    }
+
+    const BPL = W / 8;
+    const lines = [];
+    for (let y = 0; y < H; y++) {
+        const line = new Uint8Array(BPL);
+        for (let x = 0; x < W; x++) {
+            const i = y * W + x;
+            const old = g[i];
+            const nw = old < 128 ? 0 : 255;
+            const err = old - nw;
+            if (x + 1 < W) g[i + 1] += err * 7 / 16;
+            if (y + 1 < H) {
+                if (x > 0) g[i + W - 1] += err * 3 / 16;
+                g[i + W] += err * 5 / 16;
+                if (x + 1 < W) g[i + W + 1] += err * 1 / 16;
+            }
+            if (nw === 0) line[x >> 3] |= 1 << (x & 7); // 1 = titik hitam, LSB dulu
+        }
+        lines.push(line);
+    }
+    return lines;
+}
+
+async function writeChunk(chunk) {
+    for (let t = 0; t < 5; t++) {
+        try { await printerChar.writeValueWithoutResponse(chunk); return; }
+        catch (e) { await sleep(30); }
+    }
+    throw new Error('Koneksi ke printer terputus saat mengirim data.');
+}
+
+async function sendToPrinter(bytes, onProgress) {
+    for (let i = 0; i < bytes.length; i += PRINTER.chunkSize) {
+        await writeChunk(bytes.slice(i, i + PRINTER.chunkSize));
+        if (onProgress) onProgress(Math.min(100, Math.round((i / bytes.length) * 100)));
+        await sleep(PRINTER.chunkDelay);
+    }
+}
+
+// --- Tombol Cetak ---
+async function printImage() {
+    if (isPrinting) return;
+
+    // Tanpa Web Bluetooth: pakai dialog print biasa
+    if (!navigator.bluetooth) {
+        if (confirm('Web Bluetooth tidak tersedia. Cetak lewat dialog print biasa?')) window.print();
+        return;
+    }
+
+    const btn = document.getElementById('btn-print');
+    const originalText = btn.textContent;
+    isPrinting = true;
+    btn.disabled = true;
+
+    try {
+        btn.textContent = 'Menyambung printer...';
+        if (!(await ensurePrinter())) return;
+
+        btn.textContent = 'Menyiapkan gambar...';
+        const lines = await imageToPrintLines(finalImage.src);
+
+        const out = [];
+        out.push(...pkt(0xA3, [0x00]));
+        out.push(...pkt(0xA4, [PRINTER.quality]));
+        out.push(...pkt(0xA6, [0xAA,0x55,0x17,0x38,0x44,0x5F,0x5F,0x5F,0x44,0x38,0x2C]));
+        out.push(...pkt(0xAF, [PRINTER.energy & 0xFF, (PRINTER.energy >> 8) & 0xFF]));
+        out.push(...pkt(0xBE, [0x00]));
+        out.push(...pkt(0xBD, [PRINTER.speed]));
+        for (const line of lines) out.push(...pkt(0xA2, line));
+        out.push(...pkt(0xA1, [PRINTER.feedLines, 0x00]));
+        out.push(...pkt(0xA6, [0xAA,0x55,0x17,0,0,0,0,0,0,0,0x17]));
+        out.push(...pkt(0xA3, [0x00]));
+
+        await sendToPrinter(new Uint8Array(out), (p) => {
+            btn.textContent = `Mengirim ke printer... ${p}%`;
+        });
+
+        btn.textContent = 'Selesai dikirim ✅';
+        await sleep(1500);
+    } catch (e) {
+        console.error(e);
+        alert('Gagal mencetak: ' + e.message);
+    } finally {
+        btn.textContent = originalText;
+        btn.disabled = false;
+        isPrinting = false;
+    }
+}
 
 function finishSession() {
+    if (isPrinting) return; // tunggu pengiriman ke printer selesai
     clearInterval(printTimerInterval);
     showScreen('screen-thankyou');
 }
