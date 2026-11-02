@@ -18,7 +18,10 @@
             <span class="logo-text">✨ Avotobooth ✨</span>
         </div>
         
-        <div id="global-timer" class="timer-display hidden">Sisa Waktu: <span id="time-remaining">05:00</span></div>
+        <div class="top-right">
+            <div id="printer-status" class="printer-status off" onclick="connectPrinterClick()" title="Klik untuk menghubungkan printer">🖨️ Printer: belum terhubung</div>
+            <div id="global-timer" class="timer-display hidden">Sisa Waktu: <span id="time-remaining">05:00</span></div>
+        </div>
     </div>
 
     <section id="screen-welcome" class="screen active">
@@ -39,6 +42,8 @@
             </div>
 
             <button class="btn-primary" onclick="startSession()">Mulai Sesi 📸</button>
+            <br>
+            <button class="btn-secondary" onclick="connectPrinterClick()">🔌 Hubungkan Printer</button>
         </div>
     </section>
 
@@ -112,7 +117,7 @@
 
         <div class="action-buttons">
             <button class="btn-secondary" onclick="downloadImage()">Unduh ⬇️</button>
-            <button class="btn-primary" onclick="printImage()">Cetak 🖨️</button>
+            <button id="btn-print" class="btn-primary" onclick="printImage()">Cetak 🖨️</button>
         </div>
         <button class="btn-text" onclick="finishSession()">Selesai</button>
     </section>
