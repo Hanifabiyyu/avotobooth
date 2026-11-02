@@ -346,3 +346,16 @@ h1, h2 {
     color: #FF85A2;
     font-size: 1.5rem; /* Sesuaikan ukuran teks */
 }
+/* --- Status Printer --- */
+.top-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
+.printer-status {
+    font-size: 0.85rem;
+    font-weight: bold;
+    padding: 6px 12px;
+    border-radius: 20px;
+    cursor: pointer;
+    user-select: none;
+}
+.printer-status.on  { background: var(--pastel-mint); color: #2e7d5b; }
+.printer-status.off { background: #ffe0e0; color: #c0392b; }
+.btn-primary:disabled { opacity: 0.6; cursor: wait; }
